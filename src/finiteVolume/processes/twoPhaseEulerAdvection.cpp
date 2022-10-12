@@ -194,13 +194,17 @@ ablate::finiteVolume::processes::TwoPhaseEulerAdvection::TwoPhaseEulerAdvection(
                                                                                 std::shared_ptr<fluxCalculator::FluxCalculator> fluxCalculatorGasGas,
                                                                                 std::shared_ptr<fluxCalculator::FluxCalculator> fluxCalculatorGasLiquid,
                                                                                 std::shared_ptr<fluxCalculator::FluxCalculator> fluxCalculatorLiquidGas,
-                                                                                std::shared_ptr<fluxCalculator::FluxCalculator> fluxCalculatorLiquidLiquid)
-    : eosGas(std::move(eosGas)),
+                                                                                std::shared_ptr<fluxCalculator::FluxCalculator> fluxCalculatorLiquidLiquid,
+                                                                                std::shared_ptr<eos::transport::TransportModel> transportModelGas,
+                                                                                std::shared_ptr<eos::transport::TransportModel> transportModelLiquid)
+    : transportModelGas(std::move(transportModelGas)),
+      transportModelLiquid(std::move(transportModelLiquid)),
+      eosGas(std::move(eosGas)),
       eosLiquid(std::move(eosLiquid)),
       fluxCalculatorGasGas(std::move(fluxCalculatorGasGas)),
       fluxCalculatorGasLiquid(std::move(fluxCalculatorGasLiquid)),
       fluxCalculatorLiquidGas(std::move(fluxCalculatorLiquidGas)),
-      fluxCalculatorLiquidLiquid(std::move(fluxCalculatorLiquidLiquid)) {}
+      fluxCalculatorLiquidLiquid(std::move(fluxCalculatorLiquidLiquid)){}
 
 void ablate::finiteVolume::processes::TwoPhaseEulerAdvection::Setup(ablate::finiteVolume::FiniteVolumeSolver &flow) {
     // Create the decoder based upon the eoses
@@ -209,6 +213,20 @@ void ablate::finiteVolume::processes::TwoPhaseEulerAdvection::Setup(ablate::fini
     // Currently, no option for species advection
     flow.RegisterRHSFunction(CompressibleFlowComputeEulerFlux, this, "euler", {"densityVF", "euler"}, {});
     flow.RegisterRHSFunction(CompressibleFlowComputeVFFlux, this, "densityVF", {"densityVF", "euler"}, {});
+
+    // if coefficients for diffusion, compute diffusion
+    if (transportModelGas && transportModelLiquid) {
+        diffusionData.muFunction1 = transportModelGas->GetTransportTemperatureFunction(eos::transport::TransportProperty::Viscosity, flow.GetSubDomain().GetFields());
+        diffusionData.muFunction2 = transportModelLiquid->GetTransportTemperatureFunction(eos::transport::TransportProperty::Viscosity, flow.GetSubDomain().GetFields());
+
+        diffusionData.kFunction1 = transportModelGas->GetTransportTemperatureFunction(eos::transport::TransportProperty::Conductivity, flow.GetSubDomain().GetFields());
+        diffusionData.kFunction2 = transportModelLiquid->GetTransportTemperatureFunction(eos::transport::TransportProperty::Conductivity, flow.GetSubDomain().GetFields());
+
+        if (diffusionData.muFunction1.function || diffusionData.kFunction1.function) {
+            // Register the euler diffusion source terms
+            flow.RegisterRHSFunction(TwoPhaseDiffusionFlux, &diffusionData, CompressibleFlowFields::EULER_FIELD, {CompressibleFlowFields::EULER_FIELD},{CompressibleFlowFields::TEMPERATURE_FIELD, CompressibleFlowFields::VELOCITY_FIELD});
+        }
+    }
 
     // check to see if auxFieldUpdates needed to be added
     if (flow.GetSubDomain().ContainsField(CompressibleFlowFields::VELOCITY_FIELD)) {
@@ -226,6 +244,93 @@ void ablate::finiteVolume::processes::TwoPhaseEulerAdvection::Setup(ablate::fini
         flow.RegisterAuxFieldUpdate(UpdateAuxVolumeFractionField2Gas, this, std::vector<std::string>{"volumeFraction"}, {"densityVF", "euler"});
     }
 }
+PetscErrorCode ablate::finiteVolume::processes::TwoPhaseEulerAdvection::TwoPhaseDiffusionFlux(PetscInt dim, const PetscFVFaceGeom *fg, const PetscInt *uOff, const PetscInt *uOff_x, const PetscScalar *field, const PetscScalar *grad, const PetscInt *aOff, const PetscInt *aOff_x, const PetscScalar *aux, const PetscScalar *gradAux, PetscScalar *flux, void *ctx) {
+    PetscFunctionBeginUser;
+    // this order is based upon the order that they are passed into the RegisterRHSFunction
+    const int T = 0;
+    const int VEL = 1;
+
+    PetscErrorCode ierr;
+    auto flowParameters = (DiffusionData*)ctx;
+
+    // Compute mu1, mu2, k1, k2
+    PetscReal mu1 = 0.0;
+    PetscReal mu2 = 0.0;
+    flowParameters->muFunction1.function(field, aux[aOff[T]], &mu1, flowParameters->muFunction1.context.get());
+    flowParameters->muFunction2.function(field, aux[aOff[T]], &mu2, flowParameters->muFunction2.context.get());
+    PetscReal k1 = 0.0;
+    PetscReal k2 = 0.0;
+    flowParameters->kFunction1.function(field, aux[aOff[T]], &k1, flowParameters->kFunction1.context.get());
+    flowParameters->kFunction2.function(field, aux[aOff[T]], &k2, flowParameters->kFunction2.context.get());
+
+    // Compute stress tensor tau
+    PetscReal tau[9]; //Maximum size without symmetry
+    ierr = CompressibleFlowComputeStressTensor(dim, mu1, mu2, gradAux + aOff_x[VEL], tau);
+    CHKERRQ(ierr);
+
+    // for each velocity component
+    for (PetscInt c = 0; c < dim; ++c) {
+        PetscReal viscousFlux = 0.0;
+
+        // March over each direction
+        for (PetscInt d = 0; d < dim; ++d) {
+            viscousFlux += -fg->normal[d] * tau[c * dim + d];  // This is tau[c][d]
+        }
+
+        // add in the contribution
+        flux[CompressibleFlowFields::RHOU + c] += viscousFlux;
+    }
+
+    PetscReal alpha = 1.0;
+    PetscReal k = k1 * alpha + (1 - alpha) * k2;
+    // energy equation
+    flux[CompressibleFlowFields::RHOE] = 0.0;
+    for (PetscInt d = 0; d < dim; ++d) {
+        PetscReal heatFlux = 0.0;
+        // add in the contributions for this viscous terms
+        for (PetscInt c = 0; c < dim; ++c) {
+            heatFlux += aux[aOff[VEL] + c] * tau[d * dim + c];
+        }
+
+        // heat conduction (-k dT/dx - k dT/dy - k dT/dz) . n A
+        heatFlux += k * gradAux[aOff_x[T] + d];
+
+        // Multiply by the area normal
+        heatFlux *= -fg->normal[d];
+
+        flux[CompressibleFlowFields::RHOE] += heatFlux;
+    }
+
+    // zero out the density flux
+    flux[CompressibleFlowFields::RHO] = 0.0;
+    PetscFunctionReturn(0);
+}
+PetscErrorCode ablate::finiteVolume::processes::TwoPhaseEulerAdvection::CompressibleFlowComputeStressTensor(PetscInt dim, PetscReal mu1, PetscReal mu2, const PetscReal *gradVel, PetscReal *tau) {
+    PetscFunctionBeginUser;
+    // pre-compute the div of the velocity field
+    PetscReal divVel = 0.0;
+    for (PetscInt c = 0; c < dim; ++c) {
+        divVel += gradVel[c * dim + c];
+    }
+
+    PetscReal alpha = 1.0;
+    PetscReal mu = mu1 * alpha + (1 - alpha)*mu2;
+    // March over each velocity component, u, v, w
+    for (PetscInt c = 0; c < dim; ++c) {
+        // March over each physical coordinates
+        for (PetscInt d = 0; d < dim; ++d) {
+            if (d == c) {
+                // for the xx, yy, zz, components
+                tau[c * dim + d] = 2.0 * mu * ((gradVel[c * dim + d]) - divVel / 3.0);
+            } else {
+                // for xy, xz, etc
+                tau[c * dim + d] = mu * ((gradVel[c * dim + d]) + (gradVel[d * dim + c]));
+            }
+        }
+    }
+    PetscFunctionReturn(0);
+}
+
 PetscErrorCode ablate::finiteVolume::processes::TwoPhaseEulerAdvection::CompressibleFlowComputeEulerFlux(PetscInt dim, const PetscFVFaceGeom *fg, const PetscInt *uOff, const PetscScalar *fieldL,
                                                                                                          const PetscScalar *fieldR, const PetscInt *aOff, const PetscScalar *auxL,
                                                                                                          const PetscScalar *auxR, PetscScalar *flux, void *ctx) {
@@ -1151,4 +1256,5 @@ void ablate::finiteVolume::processes::TwoPhaseEulerAdvection::StiffenedGasStiffe
 #include "registrar.hpp"
 REGISTER(ablate::finiteVolume::processes::Process, ablate::finiteVolume::processes::TwoPhaseEulerAdvection, "", ARG(ablate::eos::EOS, "eosGas", ""), ARG(ablate::eos::EOS, "eosLiquid", ""),
          ARG(ablate::finiteVolume::fluxCalculator::FluxCalculator, "fluxCalculatorGasGas", ""), ARG(ablate::finiteVolume::fluxCalculator::FluxCalculator, "fluxCalculatorGasLiquid", ""),
-         ARG(ablate::finiteVolume::fluxCalculator::FluxCalculator, "fluxCalculatorLiquidGas", ""), ARG(ablate::finiteVolume::fluxCalculator::FluxCalculator, "fluxCalculatorLiquidLiquid", ""));
+         ARG(ablate::finiteVolume::fluxCalculator::FluxCalculator, "fluxCalculatorLiquidGas", ""), ARG(ablate::finiteVolume::fluxCalculator::FluxCalculator, "fluxCalculatorLiquidLiquid", ""),
+         OPT(ablate::eos::transport::TransportModel, "transportModelGas",""), OPT(ablate::eos::transport::TransportModel, "transportModelLiquid",""));

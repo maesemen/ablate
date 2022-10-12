@@ -4,6 +4,7 @@
 #include <petsc.h>
 #include "eos/perfectGas.hpp"
 #include "eos/stiffenedGas.hpp"
+#include "eos/transport/transportModel.hpp"
 #include "finiteVolume/fluxCalculator/fluxCalculator.hpp"
 #include "process.hpp"
 
@@ -34,6 +35,17 @@ class TwoPhaseEulerAdvection : public Process {
         PetscReal p0g;
         PetscReal p0l;
     };
+    // diffusion stuff
+    struct DiffusionData{
+        eos::ThermodynamicTemperatureFunction kFunction1;
+        eos::ThermodynamicTemperatureFunction kFunction2;
+        eos::ThermodynamicTemperatureFunction muFunction1;
+        eos::ThermodynamicTemperatureFunction muFunction2;
+    };
+    const std::shared_ptr<eos::transport::TransportModel> transportModelGas;
+    const std::shared_ptr<eos::transport::TransportModel> transportModelLiquid;
+    DiffusionData diffusionData;
+
     static PetscErrorCode FormFunctionGas(SNES snes, Vec x, Vec F, void *ctx);
     static PetscErrorCode FormJacobianGas(SNES snes, Vec x, Mat J, Mat P, void *ctx);
     static PetscErrorCode FormFunctionStiff(SNES snes, Vec x, Vec F, void *ctx);
@@ -178,8 +190,12 @@ class TwoPhaseEulerAdvection : public Process {
 
     TwoPhaseEulerAdvection(std::shared_ptr<eos::EOS> eosGas, std::shared_ptr<eos::EOS> eosLiquid, std::shared_ptr<fluxCalculator::FluxCalculator> fluxCalculatorGasGas,
                            std::shared_ptr<fluxCalculator::FluxCalculator> fluxCalculatorGasLiquid, std::shared_ptr<fluxCalculator::FluxCalculator> fluxCalculatorLiquidGas,
-                           std::shared_ptr<fluxCalculator::FluxCalculator> fluxCalculatorLiquidLiquid);
+                           std::shared_ptr<fluxCalculator::FluxCalculator> fluxCalculatorLiquidLiquid, std::shared_ptr<eos::transport::TransportModel> transportModelGas, std::shared_ptr<eos::transport::TransportModel> transportModelLiquid);
     void Setup(ablate::finiteVolume::FiniteVolumeSolver &flow) override;
+    // diffusion
+    static PetscErrorCode TwoPhaseDiffusionFlux(PetscInt dim, const PetscFVFaceGeom* fg, const PetscInt uOff[], const PetscInt uOff_x[], const PetscScalar field[], const PetscScalar grad[],
+                                        const PetscInt aOff[], const PetscInt aOff_x[], const PetscScalar aux[], const PetscScalar gradAux[], PetscScalar flux[], void* ctx);
+    static PetscErrorCode CompressibleFlowComputeStressTensor(PetscInt dim, PetscReal mu1, PetscReal mu2, const PetscReal* gradVel, PetscReal* tau);
 
    private:
     static PetscErrorCode CompressibleFlowComputeEulerFlux(PetscInt dim, const PetscFVFaceGeom *fg, const PetscInt uOff[], const PetscScalar fieldL[], const PetscScalar fieldR[],
