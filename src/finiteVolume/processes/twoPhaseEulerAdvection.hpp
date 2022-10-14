@@ -195,7 +195,7 @@ class TwoPhaseEulerAdvection : public Process {
     // diffusion
     static PetscErrorCode TwoPhaseDiffusionFlux(PetscInt dim, const PetscFVFaceGeom* fg, const PetscInt uOff[], const PetscInt uOff_x[], const PetscScalar field[], const PetscScalar grad[],
                                         const PetscInt aOff[], const PetscInt aOff_x[], const PetscScalar aux[], const PetscScalar gradAux[], PetscScalar flux[], void* ctx);
-    static PetscErrorCode CompressibleFlowComputeStressTensor(PetscInt dim, PetscReal mu1, PetscReal mu2, const PetscReal* gradVel, PetscReal* tau);
+    static PetscErrorCode CompressibleFlowComputeStressTensor(PetscInt dim, PetscReal mu1, PetscReal mu2, PetscReal alpha, const PetscReal* gradVel, PetscReal* tau);
 
    private:
     static PetscErrorCode CompressibleFlowComputeEulerFlux(PetscInt dim, const PetscFVFaceGeom *fg, const PetscInt uOff[], const PetscScalar fieldL[], const PetscScalar fieldR[],

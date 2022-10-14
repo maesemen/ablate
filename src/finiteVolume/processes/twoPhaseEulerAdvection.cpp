@@ -249,6 +249,7 @@ PetscErrorCode ablate::finiteVolume::processes::TwoPhaseEulerAdvection::TwoPhase
     // this order is based upon the order that they are passed into the RegisterRHSFunction
     const int T = 0;
     const int VEL = 1;
+    const int VF = dim + 1;
 
     PetscErrorCode ierr;
     auto flowParameters = (DiffusionData*)ctx;
@@ -264,8 +265,9 @@ PetscErrorCode ablate::finiteVolume::processes::TwoPhaseEulerAdvection::TwoPhase
     flowParameters->kFunction2.function(field, aux[aOff[T]], &k2, flowParameters->kFunction2.context.get());
 
     // Compute stress tensor tau
+    PetscReal alpha = aux[VF];
     PetscReal tau[9]; //Maximum size without symmetry
-    ierr = CompressibleFlowComputeStressTensor(dim, mu1, mu2, gradAux + aOff_x[VEL], tau);
+    ierr = CompressibleFlowComputeStressTensor(dim, mu1, mu2, alpha, gradAux + aOff_x[VEL], tau);
     CHKERRQ(ierr);
 
     // for each velocity component
@@ -281,7 +283,6 @@ PetscErrorCode ablate::finiteVolume::processes::TwoPhaseEulerAdvection::TwoPhase
         flux[CompressibleFlowFields::RHOU + c] += viscousFlux;
     }
 
-    PetscReal alpha = 1.0;
     PetscReal k = k1 * alpha + (1 - alpha) * k2;
     // energy equation
     flux[CompressibleFlowFields::RHOE] = 0.0;
@@ -305,7 +306,7 @@ PetscErrorCode ablate::finiteVolume::processes::TwoPhaseEulerAdvection::TwoPhase
     flux[CompressibleFlowFields::RHO] = 0.0;
     PetscFunctionReturn(0);
 }
-PetscErrorCode ablate::finiteVolume::processes::TwoPhaseEulerAdvection::CompressibleFlowComputeStressTensor(PetscInt dim, PetscReal mu1, PetscReal mu2, const PetscReal *gradVel, PetscReal *tau) {
+PetscErrorCode ablate::finiteVolume::processes::TwoPhaseEulerAdvection::CompressibleFlowComputeStressTensor(PetscInt dim, PetscReal mu1, PetscReal mu2, PetscReal alpha, const PetscReal *gradVel, PetscReal *tau) {
     PetscFunctionBeginUser;
     // pre-compute the div of the velocity field
     PetscReal divVel = 0.0;
@@ -313,7 +314,6 @@ PetscErrorCode ablate::finiteVolume::processes::TwoPhaseEulerAdvection::Compress
         divVel += gradVel[c * dim + c];
     }
 
-    PetscReal alpha = 1.0;
     PetscReal mu = mu1 * alpha + (1 - alpha)*mu2;
     // March over each velocity component, u, v, w
     for (PetscInt c = 0; c < dim; ++c) {
